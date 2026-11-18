@@ -172,12 +172,14 @@
   <ItemGroup>
     <ClInclude Include="ClassFactory.h" />
     <ClInclude Include="GetThumbnail.h" />
+    <ClInclude Include="PreviewProvider.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClassFactory.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include=".\PsdThumbnailProvider.cpp" />
     <ClCompile Include="GetThumbnail.cpp" />
+    <ClCompile Include="PreviewProvider.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

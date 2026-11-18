@@ -1,12 +1,13 @@
 #include "ClassFactory.h"
 #include "PsdThumbnailProvider.h"
+#include "PreviewProvider.h"
 #include <new>
 #include <Shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 
 extern long g_cDllRef;
 
-ClassFactory::ClassFactory() : m_cRef(1) {
+ClassFactory::ClassFactory(bool preview) : m_cRef(1), m_preview(preview) {
 	InterlockedIncrement(&g_cDllRef);
 }
 
@@ -47,7 +48,9 @@ IFACEMETHODIMP ClassFactory::CreateInstance(IUnknown *pUnkOuter, REFIID riid, vo
 		hr = E_OUTOFMEMORY;
 
 		// Create the COM component.
-		PsdThumbnailProvider *pExt = new (std::nothrow) PsdThumbnailProvider();
+		IUnknown* pExt = m_preview
+			? static_cast<IUnknown*>(static_cast<IPreviewHandler*>(new (std::nothrow) PreviewProvider()))
+			: static_cast<IThumbnailProvider*>(new (std::nothrow) PsdThumbnailProvider());
 
 		if (pExt) {
 			// Query the specified interface.

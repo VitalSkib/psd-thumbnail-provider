@@ -14,11 +14,12 @@ public:
 	IFACEMETHODIMP CreateInstance(IUnknown *pUnkOuter, REFIID riid, void **ppv);
 	IFACEMETHODIMP LockServer(BOOL fLock);
 
-	ClassFactory();
+	explicit ClassFactory(bool preview);
 
 protected:
 	~ClassFactory();
 
 private:
 	long m_cRef;
+	bool m_preview;
 };

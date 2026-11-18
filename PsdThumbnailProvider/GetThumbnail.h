@@ -5,4 +5,4 @@
 
 #pragma comment(lib, "windowscodecs.lib")
 
-HBITMAP GetPSDThumbnail(IStream* stream);
+HBITMAP GetPSDThumbnail(IStream* stream, int previewSize = 0);

@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <vector>
 #include "GetThumbnail.h"
 #include "gdiplus.h"
 #include <Shlwapi.h>
@@ -178,7 +180,57 @@ inline void CmykToBgr(const BYTE *cmyk, BYTE *bgr) {
 		k * (-22.33816807309886 * k - 180.12613974708367));
 }
 
-HBITMAP GetPSDThumbnail(IStream* stream) {
+
+static HBITMAP ReadFloatPreview(IStream* stream, int width, int height, int limit) {
+    const int longest = max(width, height);
+    const int outWidth = max(1, int((int64_t)width * min(limit, longest) / longest));
+    const int outHeight = max(1, int((int64_t)height * min(limit, longest) / longest));
+    LARGE_INTEGER zero = {};
+    ULARGE_INTEGER start = {};
+    if (FAILED(stream->Seek(zero, STREAM_SEEK_CUR, &start))) return nullptr;
+    STATSTG stat = {};
+    const uint64_t plane = uint64_t(width) * height * 4;
+    if (FAILED(stream->Stat(&stat, STATFLAG_NONAME)) || start.QuadPart > stat.cbSize.QuadPart
+        || plane * 3 > stat.cbSize.QuadPart - start.QuadPart) return nullptr;
+
+    std::vector<BYTE> pixels(size_t(outWidth) * outHeight * 4, 255);
+    std::vector<BYTE> row(size_t(width) * 4);
+    for (int channel = 0; channel < 3; ++channel) {
+        for (int y = 0; y < outHeight; ++y) {
+            const int sourceY = int((int64_t(2 * y + 1) * height) / (2 * outHeight));
+            LARGE_INTEGER position = {};
+            position.QuadPart = start.QuadPart + plane * channel + uint64_t(sourceY) * width * 4;
+            ULONG read = 0;
+            if (FAILED(stream->Seek(position, STREAM_SEEK_SET, nullptr))
+                || FAILED(stream->Read(row.data(), ULONG(row.size()), &read))
+                || read != row.size()) return nullptr;
+            for (int x = 0; x < outWidth; ++x) {
+                const int sourceX = int((int64_t(2 * x + 1) * width) / (2 * outWidth));
+                const BYTE* sample = row.data() + size_t(sourceX) * 4;
+                const uint32_t bits = (uint32_t(sample[0]) << 24) | (uint32_t(sample[1]) << 16)
+                    | (uint32_t(sample[2]) << 8) | sample[3];
+                float value;
+                memcpy(&value, &bits, sizeof(value));
+                const float linear = value > 0 ? min(1.0f, value) : 0.0f;
+                const float encoded = linear <= 0.0031308f ? 12.92f * linear
+                    : 1.055f * powf(linear, 1.0f / 2.4f) - 0.055f;
+                pixels[(size_t(y) * outWidth + x) * 4 + 2 - channel] = BYTE(encoded * 255 + 0.5f);
+            }
+        }
+    }
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = outWidth;
+    info.bmiHeader.biHeight = -outHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    void* destination = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &destination, nullptr, 0);
+    if (bitmap) memcpy(destination, pixels.data(), pixels.size());
+    return bitmap;
+}
+
+HBITMAP GetPSDThumbnail(IStream* stream, int previewSize) {
 	HBITMAP result = NULL;
 	UINT signature = ReadUInt32(stream);
 	USHORT version = ReadUInt16(stream);
@@ -193,7 +245,7 @@ HBITMAP GetPSDThumbnail(IStream* stream) {
 	USHORT bitsPerChannel = ReadUInt16(stream);
 	USHORT colorMode = ReadUInt16(stream);
 	int maxSize = version == 1 ? 30000 : 300000;
-	if (width > maxSize || height > maxSize) return NULL;
+	if (width <= 0 || height <= 0 || width > maxSize || height > maxSize) return NULL;
 
 	// color mode data (palette of indexed color mode: 256 red values, followed by green and blue values)
 	auto colorModeLength = ReadSectionLength(stream);
@@ -244,8 +296,12 @@ HBITMAP GetPSDThumbnail(IStream* stream) {
 	int bytesPerChannel = bitsPerChannel / 8;
 	bool supportedMode = colorMode == 3 || cmyk || grayscale || (indexed && hasPalette);
 	bool supportedDepth = bitsPerChannel == 8 || (bitsPerChannel == 16 && !indexed);
+	const bool floatPreview = previewSize && colorMode == 3 && channels == 3 && bitsPerChannel == 32;
+	const int outputSize = previewSize ? previewSize : 256;
 
-	if (supportedMode && supportedDepth && channels >= colorChannels && ((width <= 256 && height <= 256) || !thumbnailOffset)) {
+	if (supportedMode && (supportedDepth || floatPreview) && channels >= colorChannels
+		&& (floatPreview || uint64_t(width) * height <= 24ULL * 1024 * 1024)
+		&& (previewSize || (width <= 256 && height <= 256) || !thumbnailOffset)) {
 		Seek(stream, resourceEnd, STREAM_SEEK_SET);
 
 		auto layerAndMaskInfoLength = ReadSectionLength(stream, version);
@@ -253,7 +309,9 @@ HBITMAP GetPSDThumbnail(IStream* stream) {
 
 		USHORT compression = ReadUInt16(stream);
 
-		if (compression == 1 || compression == 0) {
+		if (floatPreview && compression == 0) result = ReadFloatPreview(stream, width, height, previewSize);
+
+		if (supportedDepth && (compression == 1 || compression == 0)) {
 			size_t pixels = (size_t)width * height;
 			size_t dataLength = pixels * 4;
 			BYTE* data = new BYTE[dataLength];
@@ -314,17 +372,17 @@ HBITMAP GetPSDThumbnail(IStream* stream) {
 				}
 			}
 
-			if (!allWhite) {
-				if (width > 256 || height > 256) {
+			if (previewSize || !allWhite) {
+				if (width > outputSize || height > outputSize) {
 					HBITMAP fullBitmap = CreateBitmap(width, height, 1, 32, data);
 					int thumbWidth, thumbHeight;
 
 					if (width > height) {
-						thumbWidth = 256;
-						thumbHeight = height * thumbWidth / width;
+						thumbWidth = outputSize;
+						thumbHeight = max(1, int(int64_t(height) * thumbWidth / width));
 					} else {
-						thumbHeight = 256;
-						thumbWidth = width * thumbHeight / height;
+						thumbHeight = outputSize;
+						thumbWidth = max(1, int(int64_t(width) * thumbHeight / height));
 					}
 
 					BITMAPINFO bmi = {};
@@ -367,35 +425,27 @@ HBITMAP GetPSDThumbnail(IStream* stream) {
 	}
 
 	// read thumbnail resource
-	if (!result && thumbnailOffset) {
-		Seek(stream, thumbnailOffset, STREAM_SEEK_SET);
-		ULONG_PTR token;
-		GdiplusStartupInput input;
-
-		if (Ok == GdiplusStartup(&token, &input, NULL)) {
-			Seek(stream, 4 + 4 + 4 + 4 + 4 + 4 + 2 + 2, STREAM_SEEK_CUR);
-
-			BYTE *data = new BYTE[thumbnailLength]; // TODO: should this be freed?
-			ReadData(stream, data, thumbnailLength);
-			IStream *memory = SHCreateMemStream(data, thumbnailLength);
-
-			if (memory) {
-				Seek(memory, 0, STREAM_SEEK_SET);
-
-				Bitmap *bitmap = Bitmap::FromStream(memory);
-
-				if (bitmap) {
-					Color color(0, 255, 255, 255);
-					bitmap->GetHBITMAP(color, &result);
-					delete bitmap;
-				}
-
-				memory->Release(); // test
-			}
-		}
-
-		GdiplusShutdown(token);
-	}
+	if (!result && thumbnailOffset && thumbnailLength > 28 && thumbnailLength <= 16 * 1024 * 1024) {
+        Seek(stream, thumbnailOffset + 28, STREAM_SEEK_SET);
+        std::vector<BYTE> data(thumbnailLength - 28);
+        ULONG bytesRead = 0;
+        if (SUCCEEDED(stream->Read(data.data(), ULONG(data.size()), &bytesRead)) && bytesRead == data.size()) {
+            ULONG_PTR token = 0;
+            GdiplusStartupInput input;
+            if (Ok == GdiplusStartup(&token, &input, nullptr)) {
+                IStream* memory = SHCreateMemStream(data.data(), ULONG(data.size()));
+                if (memory) {
+                    {
+                        Bitmap bitmap(memory);
+                        if (bitmap.GetLastStatus() == Ok)
+                            bitmap.GetHBITMAP(Color(0, 255, 255, 255), &result);
+                    }
+                    memory->Release();
+                }
+                GdiplusShutdown(token);
+            }
+        }
+    }
 
 	return result;
 }
