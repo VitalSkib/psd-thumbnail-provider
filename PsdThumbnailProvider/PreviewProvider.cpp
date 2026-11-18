@@ -131,8 +131,12 @@ LRESULT CALLBACK PreviewProvider::WindowProc(HWND window, UINT message, WPARAM w
     HDC dc = BeginPaint(window, &paint);
     RECT area = {};
     GetClientRect(window, &area);
-    const COLORREF color = self && self->background != CLR_INVALID
-        ? self->background : DefaultBackground();
+    const COLORREF defaultColor = DefaultBackground();
+    const COLORREF hostColor = self ? self->background : CLR_INVALID;
+    // Some Explorer hosts suggest the legacy white window color in dark mode.
+    const bool legacyDefault = hostColor == RGB(255, 255, 255)
+        || hostColor == GetSysColor(COLOR_WINDOW);
+    const COLORREF color = hostColor == CLR_INVALID || legacyDefault ? defaultColor : hostColor;
     SetDCBrushColor(dc, color);
     FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     BITMAP image = {};
