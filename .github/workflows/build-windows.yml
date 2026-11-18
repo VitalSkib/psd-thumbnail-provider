@@ -1,0 +1,30 @@
+name: Build Windows x64 DLL
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'psd-provider'
+          msbuild PsdThumbnailProvider/PsdThumbnailProvider.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$output/"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item -LiteralPath (Join-Path $output 'PsdThumbnailProvider.dll') -Destination artifact -ErrorAction Stop
+          Copy-Item -LiteralPath LICENSE -Destination artifact -ErrorAction Stop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PsdThumbnailProvider-x64
+          path: artifact/
+          if-no-files-found: error
