@@ -1,5 +1,8 @@
 #include "PreviewProvider.h"
-#include "GetThumbnail.h"
+#include <thumbcache.h>
+#include <wrl/client.h>
+
+#pragma comment(lib, "ole32.lib")
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -33,8 +36,8 @@ HRESULT PreviewProvider::QueryInterface(REFIID iid, void** result) {
     *result = nullptr;
     if (iid == __uuidof(IUnknown) || iid == __uuidof(IPreviewHandler))
         *result = static_cast<IPreviewHandler*>(this);
-    else if (iid == __uuidof(IInitializeWithStream))
-        *result = static_cast<IInitializeWithStream*>(this);
+    else if (iid == __uuidof(IInitializeWithItem))
+        *result = static_cast<IInitializeWithItem*>(this);
     else if (iid == __uuidof(IPreviewHandlerVisuals))
         *result = static_cast<IPreviewHandlerVisuals*>(this);
     else return E_NOINTERFACE;
@@ -47,11 +50,11 @@ ULONG PreviewProvider::Release() {
     if (!remaining) delete this;
     return remaining;
 }
-HRESULT PreviewProvider::Initialize(IStream* input, DWORD) {
+HRESULT PreviewProvider::Initialize(IShellItem* input, DWORD) {
     if (!input) return E_POINTER;
-    if (stream) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+    if (item) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
     input->AddRef();
-    stream = input;
+    item = input;
     return S_OK;
 }
 HRESULT PreviewProvider::SetWindow(HWND host, const RECT* bounds) {
@@ -74,13 +77,17 @@ HRESULT PreviewProvider::SetBackgroundColor(COLORREF color) {
     return S_OK;
 }
 HRESULT PreviewProvider::DoPreview() {
-    if (!stream || !parent || window) return E_UNEXPECTED;
-    try {
-        bitmap = GetPSDThumbnail(stream, 2048);
-    } catch (...) {
-        return E_FAIL;
-    }
-    if (!bitmap) return E_FAIL;
+    if (!item || !parent || window) return E_UNEXPECTED;
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IThumbnailCache> cache;
+    HRESULT hr = CoCreateInstance(__uuidof(LocalThumbnailCache), nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&cache));
+    if (FAILED(hr)) return hr;
+    ComPtr<ISharedBitmap> cachedBitmap;
+    hr = cache->GetThumbnail(item, 1024, WTS_EXTRACT, &cachedBitmap, nullptr, nullptr);
+    if (FAILED(hr)) return hr;
+    hr = cachedBitmap->Detach(&bitmap);
+    if (FAILED(hr) || !bitmap) return FAILED(hr) ? hr : E_FAIL;
     WNDCLASSW wc = {};
     wc.hInstance = g_hInst;
     wc.lpfnWndProc = WindowProc;
@@ -104,8 +111,8 @@ HRESULT PreviewProvider::Unload() {
     window = nullptr;
     if (bitmap) DeleteObject(bitmap);
     bitmap = nullptr;
-    if (stream) stream->Release();
-    stream = nullptr;
+    if (item) item->Release();
+    item = nullptr;
     return S_OK;
 }
 HRESULT PreviewProvider::SetFocus() {

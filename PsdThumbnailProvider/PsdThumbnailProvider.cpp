@@ -12,6 +12,7 @@ PsdThumbnailProvider::PsdThumbnailProvider() : m_cRef(1), m_pStream(NULL) {
 }
 
 PsdThumbnailProvider::~PsdThumbnailProvider() {
+	if (m_pStream) m_pStream->Release();
 	InterlockedDecrement(&g_cDllRef);
 }
 
@@ -43,6 +44,7 @@ IFACEMETHODIMP_(ULONG) PsdThumbnailProvider::Release() {
 // IInitializeWithStream
 
 IFACEMETHODIMP PsdThumbnailProvider::Initialize(IStream *pStream, DWORD grfMode) {
+	if (!pStream) return E_POINTER;
 	HRESULT hr = HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
 
 	if (m_pStream == NULL)
@@ -54,10 +56,18 @@ IFACEMETHODIMP PsdThumbnailProvider::Initialize(IStream *pStream, DWORD grfMode)
 // IThumbnailProvider
 
 IFACEMETHODIMP PsdThumbnailProvider::GetThumbnail(UINT cx, HBITMAP *phbmp, WTS_ALPHATYPE *pdwAlpha) {
+	if (!phbmp || !pdwAlpha) return E_POINTER;
+	*phbmp = nullptr;
 	*pdwAlpha = WTSAT_ARGB;
-	*phbmp = GetPSDThumbnail(m_pStream);
-
-	m_pStream->Release();
+	if (!m_pStream) return E_UNEXPECTED;
+	LARGE_INTEGER start = {};
+	if (FAILED(m_pStream->Seek(start, STREAM_SEEK_SET, nullptr))) return E_FAIL;
+	try {
+		const int largeSize = cx >= 512 ? int(min(cx, 1024U)) : 0;
+		*phbmp = GetPSDThumbnail(m_pStream, largeSize);
+	} catch (...) {
+		return E_FAIL;
+	}
 
 	return *phbmp != NULL ? NOERROR : E_NOTIMPL;
 }

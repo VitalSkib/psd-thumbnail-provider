@@ -2,14 +2,14 @@
 #include <windows.h>
 #include <shobjidl.h>
 
-class PreviewProvider final : public IPreviewHandler, public IInitializeWithStream, public IPreviewHandlerVisuals {
+class PreviewProvider final : public IPreviewHandler, public IInitializeWithItem, public IPreviewHandlerVisuals {
 public:
     PreviewProvider();
     ~PreviewProvider();
     IFACEMETHODIMP QueryInterface(REFIID iid, void** result) override;
     IFACEMETHODIMP_(ULONG) AddRef() override;
     IFACEMETHODIMP_(ULONG) Release() override;
-    IFACEMETHODIMP Initialize(IStream* stream, DWORD mode) override;
+    IFACEMETHODIMP Initialize(IShellItem* item, DWORD mode) override;
     IFACEMETHODIMP SetWindow(HWND parent, const RECT* rect) override;
     IFACEMETHODIMP SetRect(const RECT* rect) override;
     IFACEMETHODIMP DoPreview() override;
@@ -23,7 +23,7 @@ public:
 private:
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     long references = 1;
-    IStream* stream = nullptr;
+    IShellItem* item = nullptr;
     HWND parent = nullptr;
     HWND window = nullptr;
     RECT rect = {};
