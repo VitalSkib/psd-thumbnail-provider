@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include "GetThumbnail.h"
@@ -211,9 +212,10 @@ static HBITMAP ReadFloatPreview(IStream* stream, int width, int height, int limi
                     | (uint32_t(sample[2]) << 8) | sample[3];
                 float value;
                 memcpy(&value, &bits, sizeof(value));
-                const float linear = value > 0 ? min(1.0f, value) : 0.0f;
-                const float encoded = linear <= 0.0031308f ? 12.92f * linear
-                    : 1.055f * powf(linear, 1.0f / 2.4f) - 0.055f;
+                // Match hdr_thumb's Reinhard curve and display gamma.
+                const float linear = value > 0.0f ? value : 0.0f;
+                const float mapped = std::isinf(linear) ? 1.0f : linear / (1.0f + linear);
+                const float encoded = powf(mapped, 1.0f / 2.2f);
                 pixels[(size_t(y) * outWidth + x) * 4 + 2 - channel] = BYTE(encoded * 255 + 0.5f);
             }
         }
