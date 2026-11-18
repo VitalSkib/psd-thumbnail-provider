@@ -149,7 +149,13 @@ LRESULT CALLBACK PreviewProvider::WindowProc(HWND window, UINT message, WPARAM w
     BITMAP image = {};
     if (self && self->bitmap && GetObjectW(self->bitmap, sizeof(image), &image)
         && area.right > 0 && area.bottom > 0 && image.bmWidth > 0 && image.bmHeight > 0) {
-        const double scale = min(double(area.right) / image.bmWidth, double(area.bottom) / image.bmHeight);
+        // Explorer supplies the host rectangle; the handler positions the bitmap within it.
+        const UINT dpi = GetDpiForWindow(window);
+        const int leftInset = MulDiv(12, dpi ? dpi : 96, 96);
+        const int rightInset = MulDiv(8, dpi ? dpi : 96, 96);
+        const int left = area.right > leftInset + rightInset ? leftInset : 0;
+        const int availableWidth = left ? area.right - leftInset - rightInset : area.right;
+        const double scale = min(double(availableWidth) / image.bmWidth, double(area.bottom) / image.bmHeight);
         const int width = max(1, int(image.bmWidth * scale + 0.5));
         const int height = max(1, int(image.bmHeight * scale + 0.5));
         HDC source = CreateCompatibleDC(dc);
@@ -157,7 +163,7 @@ LRESULT CALLBACK PreviewProvider::WindowProc(HWND window, UINT message, WPARAM w
             HGDIOBJ old = SelectObject(source, self->bitmap);
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchBlt(dc, (area.right - width) / 2, (area.bottom - height) / 2,
+            StretchBlt(dc, left + (availableWidth - width) / 2, (area.bottom - height) / 2,
                 width, height, source, 0, 0, image.bmWidth, image.bmHeight, SRCCOPY);
             SelectObject(source, old);
             DeleteDC(source);
