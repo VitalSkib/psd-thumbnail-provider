@@ -1,0 +1,177 @@
+name: Build and publish upstream releases
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and test without updating the branch or publishing a release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    outputs:
+      ready: ${{ steps.candidate.outputs.ready }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      commit: ${{ steps.candidate.outputs.commit }}
+      base: ${{ steps.candidate.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: preview-system-cache
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Merge the latest official release
+        id: candidate
+        shell: bash
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          upstream=Agamnentzar/psd-thumbnail-provider
+          upstream_tag=$(gh api "repos/$upstream/releases/latest" --jq .tag_name)
+          if [[ ! "$upstream_tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected upstream release tag."
+            exit 1
+          fi
+          tag="upstream-${upstream_tag#v}"
+          if [[ "$DRY_RUN" != true ]]; then
+            if [[ "$tag" == upstream-1.8.0 ]]; then
+              echo "The working branch already includes the baseline upstream 1.8.0."
+              exit 0
+            fi
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Already published: $tag"
+              exit 0
+            fi
+          fi
+
+          base=$(git rev-parse HEAD)
+          git fetch --no-tags "https://github.com/$upstream.git" "refs/tags/$upstream_tag"
+          target=$(git rev-parse 'FETCH_HEAD^{commit}')
+          baseline=e8ab03043cd2e9aa0005d8ed81f7713d2cf7a8e7
+          if ! git merge-base --is-ancestor "$baseline" "$target"; then
+            echo "::error::The upstream release does not descend from the tested 1.8.0 baseline."
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c upstream-candidate
+          if ! git merge --no-edit --no-ff "$target"; then
+            git diff --name-only --diff-filter=U
+            echo "::error::Upstream merge failed. Resolve the conflicts in preview-system-cache before publishing."
+            exit 1
+          fi
+          commit=$(git rev-parse HEAD)
+          mkdir -p ../delivery
+          if [[ "$base" != "$commit" ]]; then
+            git bundle create ../delivery/upstream.bundle refs/heads/upstream-candidate "^$base"
+          fi
+          {
+            echo "ready=true"
+            echo "tag=$tag"
+            echo "commit=$commit"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: microsoft/setup-msbuild@v2
+        if: steps.candidate.outputs.ready == 'true'
+      - name: Build, test and package the Windows x64 DLL
+        if: steps.candidate.outputs.ready == 'true'
+        shell: pwsh
+        working-directory: source
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'psd-provider'
+          msbuild PsdThumbnailProvider/PsdThumbnailProvider.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 "/p:OutDir=$output/"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dll = Join-Path $output 'PsdThumbnailProvider.dll'
+          python ../automation/.github/scripts/check-thumbnail-provider.py $dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @('install_psd_thumb.bat','install_psd_thumb.ps1','uninstall_psd_thumb.bat','uninstall_psd_thumb.ps1')
+          $package = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'psd-package')
+          Copy-Item -LiteralPath $dll,LICENSE -Destination $package.FullName -ErrorAction Stop
+          foreach ($file in $files) {
+            if ($file.EndsWith('.ps1')) {
+              $tokens = $null
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "Package/$file").Path,[ref]$tokens,[ref]$errors) | Out-Null
+              if ($errors) { throw ($errors | Out-String) }
+            }
+            Copy-Item -LiteralPath "Package/$file" -Destination $package.FullName -ErrorAction Stop
+          }
+          Compress-Archive -Path "$($package.FullName)/*" -DestinationPath "../delivery/PSD-thumbnail-provider-$env:RELEASE_TAG-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.candidate.outputs.ready == 'true'
+        with:
+          name: tested-upstream-build
+          path: delivery/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: needs.build.outputs.ready == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: preview-system-cache
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-upstream-build
+          path: delivery
+      - name: Advance the fork branch and publish the tested ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+          BASE: ${{ needs.build.outputs.base }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^upstream-[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ && "$BASE" =~ ^[0-9a-f]{40}$ ]]
+          git fetch origin refs/heads/preview-system-cache
+          current=$(git rev-parse FETCH_HEAD)
+          if [[ "$current" != "$BASE" && "$current" != "$COMMIT" ]]; then
+            echo "::error::The fork branch changed during the build. Re-run against its new head."
+            exit 1
+          fi
+          if [[ "$current" != "$COMMIT" ]]; then
+            git fetch "$PWD/delivery/upstream.bundle" refs/heads/upstream-candidate
+            [[ "$(git rev-parse FETCH_HEAD)" == "$COMMIT" ]]
+            git merge-base --is-ancestor "$BASE" "$COMMIT"
+            git push origin "$COMMIT:refs/heads/preview-system-cache"
+          fi
+          package="delivery/PSD-thumbnail-provider-$TAG-x64.zip"
+          [[ -s "$package" ]]
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" "$package" --repo "$GITHUB_REPOSITORY" --target "$COMMIT" \
+              --title "PSD and PSB Thumbnail Provider — $TAG" \
+              --notes "Built from the fork with the latest upstream release. Includes the Windows x64 DLL and install/uninstall scripts. The fork's PSD/PSB previews use Explorer's native rendering."
+          fi
