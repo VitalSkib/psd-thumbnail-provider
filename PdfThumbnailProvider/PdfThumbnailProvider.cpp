@@ -12,8 +12,8 @@
 #include <new>
 
 using namespace winrt;
-using namespace Windows::Data::Pdf;
-using namespace Windows::Storage::Streams;
+using namespace winrt::Windows::Data::Pdf;
+using namespace winrt::Windows::Storage::Streams;
 
 static constexpr GUID ProviderId =
     {0xcd1aa892, 0x67a1, 0x48a9, {0xa7, 0x04, 0x50, 0xf4, 0x3b, 0xf4, 0xd5, 0x69}};

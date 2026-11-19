@@ -22,7 +22,7 @@
     </ClCompile>
     <Link>
       <ModuleDefinitionFile>Exports.def</ModuleDefinitionFile>
-      <AdditionalDependencies>windowsapp.lib;runtimeobject.lib;shcore.lib;ole32.lib;windowscodecs.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>windowsapp.lib;runtimeobject.lib;shcore.lib;ole32.lib;uuid.lib;windowscodecs.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="PdfThumbnailProvider.cpp" /></ItemGroup>
