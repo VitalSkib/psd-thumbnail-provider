@@ -9,6 +9,7 @@
 #include <memory>
 #include <cstring>
 #include <cwchar>
+#include <cstdio>
 #include <utility>
 #include <string>
 #include <vector>
@@ -26,6 +27,20 @@ static std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     check_hresult(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &raw));
     std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> path(raw, CoTaskMemFree);
     return path.get();
+}
+
+static void Trace(const char* stage, HRESULT result = S_OK) noexcept {
+    try {
+        auto name = KnownFolder(FOLDERID_LocalAppDataLow) + L"\\OfficeExplorerPreview-diagnostic.txt";
+        const HANDLE raw = CreateFileW(name.c_str(), FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+        if (raw == INVALID_HANDLE_VALUE) return;
+        handle file{raw};
+        char line[128]{};
+        const int size = sprintf_s(line, "%lu %s 0x%08lx\r\n", GetCurrentProcessId(), stage, static_cast<unsigned long>(result));
+        DWORD written = 0;
+        if (size > 0) WriteFile(file.get(), line, size, &written, nullptr);
+    } catch (...) {}
 }
 
 struct Scratch {
@@ -158,6 +173,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     HRESULT __stdcall Initialize(IStream* input, DWORD) noexcept override {
         if (!input) return E_POINTER;
         if (source) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        Trace("Initialize stream");
         source.copy_from(input);
         return S_OK;
     }
@@ -175,6 +191,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
 
     HRESULT __stdcall SetWindow(HWND window, const RECT* rect) noexcept override {
         if (!rect) return E_POINTER;
+        Trace("SetWindow");
         parent = window;
         if (child && GetParent(child) != window) SetParent(child, window);
         return SetRect(rect);
@@ -189,10 +206,13 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     }
 
     HRESULT __stdcall DoPreview() noexcept override {
-        if (!source || !parent || child) return E_UNEXPECTED;
+        Trace("DoPreview");
+        if (!source || !parent || child) { Trace("Invalid state", E_UNEXPECTED); return E_UNEXPECTED; }
         try {
             pdf = GetPdf(source.get(), spreadsheet);
+            Trace("PDF ready");
             check_hresult(LoadPage(0));
+            Trace("Page rendered");
             HMODULE module = nullptr;
             check_bool(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -217,6 +237,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     }
 
     HRESULT __stdcall Unload() noexcept override {
+        Trace("Unload");
         if (child) DestroyWindow(child);
         if (pageBitmap) DeleteObject(std::exchange(pageBitmap, nullptr));
         pdf = nullptr;
