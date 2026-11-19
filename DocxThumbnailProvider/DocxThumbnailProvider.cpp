@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <memory>
 #include <cstring>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,25 @@ static std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     check_hresult(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &raw));
     std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> path(raw, CoTaskMemFree);
     return path.get();
+}
+
+static void Trace(const char* stage, HRESULT result = S_OK) noexcept {
+    try {
+        auto name = KnownFolder(FOLDERID_LocalAppDataLow) + L"\\OfficeExplorerPreview-diagnostic.txt";
+        const HANDLE raw = CreateFileW(name.c_str(), FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+        if (raw == INVALID_HANDLE_VALUE) return;
+        handle file{raw};
+        char line[128]{};
+        const int size = sprintf_s(line, "%lu %s 0x%08lx\r\n", GetCurrentProcessId(), stage, static_cast<unsigned long>(result));
+        DWORD written = 0;
+        if (size > 0) WriteFile(file.get(), line, size, &written, nullptr);
+    } catch (...) {}
+}
+
+static void PreviewResult(const char* step, HRESULT result) {
+    Trace(step, result);
+    check_hresult(result);
 }
 
 struct Scratch {
@@ -160,6 +180,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     HRESULT __stdcall Initialize(IStream* input, DWORD) noexcept override {
         if (!input) return E_POINTER;
         if (source) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        Trace("Initialize stream");
         source.copy_from(input);
         return S_OK;
     }
@@ -177,6 +198,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
 
     HRESULT __stdcall SetWindow(HWND window, const RECT* rect) noexcept override {
         if (!rect) return E_POINTER;
+        Trace("SetWindow");
         parent = window;
         area = *rect;
         return preview ? preview->SetWindow(window, rect) : S_OK;
@@ -187,25 +209,29 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
         return preview ? preview->SetRect(rect) : S_OK;
     }
     HRESULT __stdcall DoPreview() noexcept override {
-        if (!source || !parent || preview) return E_UNEXPECTED;
+        Trace("DoPreview");
+        if (!source || !parent || preview) { Trace("DoPreview state", E_UNEXPECTED); return E_UNEXPECTED; }
         try {
             std::wstring path;
             auto pdf = GetPdf(source.get(), spreadsheet, &path);
+            Trace("PDF ready");
             auto handler = create_instance<IPreviewHandler>(PdfPreviewId, CLSCTX_INPROC_SERVER);
+            Trace("Edge created");
             auto objectSite = handler.try_as<IObjectWithSite>();
-            if (objectSite && site) check_hresult(objectSite->SetSite(site.get()));
-            check_hresult(handler.as<IInitializeWithFile>()->Initialize(path.c_str(), STGM_READ));
+            if (objectSite && site) PreviewResult("Edge site", objectSite->SetSite(site.get()));
+            PreviewResult("Edge init", handler.as<IInitializeWithFile>()->Initialize(path.c_str(), STGM_READ));
             if (auto visuals = handler.try_as<IPreviewHandlerVisuals>()) {
                 if (background != CLR_INVALID) visuals->SetBackgroundColor(background);
                 if (foreground != CLR_INVALID) visuals->SetTextColor(foreground);
                 if (hasFont) visuals->SetFont(&font);
             }
-            check_hresult(handler->SetWindow(parent, &area));
+            PreviewResult("Edge window", handler->SetWindow(parent, &area));
             preview = std::move(handler);
             const HRESULT result = preview->DoPreview();
+            Trace("Edge DoPreview", result);
             if (FAILED(result)) Unload();
             return result;
-        } catch (...) { return to_hresult(); }
+        } catch (...) { auto result = to_hresult(); Trace("DoPreview exception", result); return result; }
     }
     HRESULT __stdcall Unload() noexcept override {
         const HRESULT result = preview ? preview->Unload() : S_OK;
@@ -223,6 +249,7 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
         return preview ? preview->TranslateAccelerator(message) : S_FALSE;
     }
     HRESULT __stdcall SetSite(::IUnknown* value) noexcept override {
+        Trace("SetSite");
         site.copy_from(value);
         if (auto objectSite = preview.try_as<IObjectWithSite>()) return objectSite->SetSite(value);
         return S_OK;
