@@ -1,0 +1,25 @@
+name: Build isolated DOCX thumbnail provider
+on:
+  push:
+    branches: [docx-thumbnail-test]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build DOCX provider
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'docx-thumb'
+          msbuild DocxThumbnailProvider/DocxThumbnailProvider.vcxproj /m /p:Configuration=Release /p:Platform=x64 "/p:OutDir=$output/"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item -LiteralPath (Join-Path $output 'DocxThumbnailProvider.dll') -Destination artifact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocxThumbnailProvider-x64
+          path: artifact/DocxThumbnailProvider.dll
+          if-no-files-found: error
