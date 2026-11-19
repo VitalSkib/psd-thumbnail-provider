@@ -19,17 +19,20 @@ using namespace winrt::Windows::Storage::Streams;
 struct RenderRequest {
     IStream* marshaled;
     UINT limit;
+    UINT index;
+    UINT count = 0;
     HBITMAP bitmap = nullptr;
     HRESULT result = E_FAIL;
 };
 
-static HBITMAP RenderPage(IStream* source, UINT limit) {
+static HBITMAP RenderPage(IStream* source, UINT limit, UINT index, UINT& count) {
     IRandomAccessStream input{nullptr};
     check_hresult(CreateRandomAccessStreamOverStream(source, BSOS_DEFAULT,
         guid_of<IRandomAccessStream>(), put_abi(input)));
     auto document = PdfDocument::LoadFromStreamAsync(input).get();
-    if (!document.PageCount()) throw hresult_error(E_FAIL);
-    auto page = document.GetPage(0);
+    count = document.PageCount();
+    if (index >= count) throw hresult_error(E_INVALIDARG);
+    auto page = document.GetPage(index);
     const auto size = page.Size();
     if (!(size.Width > 0 && size.Height > 0)
         || !std::isfinite(size.Width) || !std::isfinite(size.Height))
@@ -84,7 +87,7 @@ static DWORD WINAPI RenderOnWorker(void* context) noexcept {
         com_ptr<IStream> source;
         IStream* transport = std::exchange(request.marshaled, nullptr);
         check_hresult(CoGetInterfaceAndReleaseStream(transport, __uuidof(IStream), source.put_void()));
-        request.bitmap = RenderPage(source.get(), request.limit);
+        request.bitmap = RenderPage(source.get(), request.limit, request.index, request.count);
         request.result = S_OK;
     } catch (...) {
         request.result = to_hresult();
@@ -93,8 +96,8 @@ static DWORD WINAPI RenderOnWorker(void* context) noexcept {
     return 0;
 }
 
-HRESULT RenderOfficePdfThumbnail(IStream* source, UINT size, HBITMAP* bitmap) {
-    RenderRequest request{nullptr, (std::min)(size, 1024u)};
+HRESULT RenderOfficePdfPage(IStream* source, UINT size, UINT page, HBITMAP* bitmap, UINT* count) {
+    RenderRequest request{nullptr, (std::min)(size, 1600u), page};
     HRESULT hr = CoMarshalInterThreadInterfaceInStream(__uuidof(IStream), source, &request.marshaled);
     if (FAILED(hr)) return hr;
     handle worker{CreateThread(nullptr, 0, RenderOnWorker, &request, 0, nullptr)};
@@ -113,5 +116,6 @@ HRESULT RenderOfficePdfThumbnail(IStream* source, UINT size, HBITMAP* bitmap) {
         request.marshaled->Release();
     }
     *bitmap = request.bitmap;
+    if (count) *count = request.count;
     return request.result;
 }

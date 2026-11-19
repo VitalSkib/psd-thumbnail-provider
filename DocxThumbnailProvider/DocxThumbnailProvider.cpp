@@ -8,7 +8,8 @@
 #include <algorithm>
 #include <memory>
 #include <cstring>
-#include <cstdio>
+#include <cwchar>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -18,35 +19,13 @@ static constexpr GUID WordId =
     {0x06cfb719, 0x8050, 0x4cf6, {0xa5, 0x98, 0x17, 0x48, 0x47, 0x1b, 0x08, 0x49}};
 static constexpr GUID GridId =
     {0x43f420f9, 0x8d44, 0x4be3, {0xae, 0xbb, 0xbd, 0x08, 0xa7, 0xdf, 0x4c, 0xd1}};
-static constexpr GUID PdfPreviewId =
-    {0x3a84f9c2, 0x6164, 0x485c, {0xa7, 0xd9, 0x4b, 0x27, 0xf8, 0xac, 0x00, 0x9e}};
-
-HRESULT RenderOfficePdfThumbnail(IStream* source, UINT size, HBITMAP* bitmap);
+HRESULT RenderOfficePdfPage(IStream* source, UINT size, UINT page, HBITMAP* bitmap, UINT* count);
 
 static std::wstring KnownFolder(REFKNOWNFOLDERID id) {
     PWSTR raw = nullptr;
     check_hresult(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &raw));
     std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> path(raw, CoTaskMemFree);
     return path.get();
-}
-
-static void Trace(const char* stage, HRESULT result = S_OK) noexcept {
-    try {
-        auto name = KnownFolder(FOLDERID_LocalAppDataLow) + L"\\OfficeExplorerPreview-diagnostic.txt";
-        const HANDLE raw = CreateFileW(name.c_str(), FILE_APPEND_DATA,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
-        if (raw == INVALID_HANDLE_VALUE) return;
-        handle file{raw};
-        char line[128]{};
-        const int size = sprintf_s(line, "%lu %s 0x%08lx\r\n", GetCurrentProcessId(), stage, static_cast<unsigned long>(result));
-        DWORD written = 0;
-        if (size > 0) WriteFile(file.get(), line, size, &written, nullptr);
-    } catch (...) {}
-}
-
-static void PreviewResult(const char* step, HRESULT result) {
-    Trace(step, result);
-    check_hresult(result);
 }
 
 struct Scratch {
@@ -118,7 +97,7 @@ static com_ptr<IStream> OpenPdf(const std::wstring& path) {
     return stream;
 }
 
-static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet, std::wstring* pdfPath = nullptr) {
+static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet) {
     auto bytes = ReadDocument(source);
     const auto exe = KnownFolder(FOLDERID_ProgramFiles) + (spreadsheet
         ? LR"(\ArtCraft\GridCraft\gridcraft-cli.exe)" : LR"(\ArtCraft\WordCraft\wordcraft-cli.exe)");
@@ -131,7 +110,6 @@ static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet, std::wstring* 
     const auto cache = root + (spreadsheet ? L"\\grid-" : L"\\word-")
         + std::to_wstring(version.ftLastWriteTime.dwHighDateTime) + L"-"
         + std::to_wstring(version.ftLastWriteTime.dwLowDateTime) + L"-" + CacheKey(bytes) + L".pdf";
-    if (pdfPath) *pdfPath = cache;
     try { return OpenPdf(cache); }
     catch (const hresult_error&) {
         if (GetFileAttributesW(cache.c_str()) != INVALID_FILE_ATTRIBUTES) throw;
@@ -180,7 +158,6 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     HRESULT __stdcall Initialize(IStream* input, DWORD) noexcept override {
         if (!input) return E_POINTER;
         if (source) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
-        Trace("Initialize stream");
         source.copy_from(input);
         return S_OK;
     }
@@ -191,67 +168,81 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
         *alpha = WTSAT_RGB;
         if (!source || !size) return E_INVALIDARG;
         try {
-            auto pdf = GetPdf(source.get(), spreadsheet);
-            return RenderOfficePdfThumbnail(pdf.get(), (std::min)(size, 1024u), bitmap);
+            auto document = GetPdf(source.get(), spreadsheet);
+            return RenderOfficePdfPage(document.get(), (std::min)(size, 1024u), 0, bitmap, nullptr);
         } catch (...) { return to_hresult(); }
     }
 
     HRESULT __stdcall SetWindow(HWND window, const RECT* rect) noexcept override {
         if (!rect) return E_POINTER;
-        Trace("SetWindow");
         parent = window;
-        area = *rect;
-        return preview ? preview->SetWindow(window, rect) : S_OK;
+        if (child && GetParent(child) != window) SetParent(child, window);
+        return SetRect(rect);
     }
+
     HRESULT __stdcall SetRect(const RECT* rect) noexcept override {
         if (!rect) return E_POINTER;
         area = *rect;
-        return preview ? preview->SetRect(rect) : S_OK;
+        if (child) MoveWindow(child, area.left, area.top,
+            (std::max)(0L, area.right - area.left), (std::max)(0L, area.bottom - area.top), TRUE);
+        return S_OK;
     }
+
     HRESULT __stdcall DoPreview() noexcept override {
-        Trace("DoPreview");
-        if (!source || !parent || preview) { Trace("DoPreview state", E_UNEXPECTED); return E_UNEXPECTED; }
+        if (!source || !parent || child) return E_UNEXPECTED;
         try {
-            std::wstring path;
-            auto pdf = GetPdf(source.get(), spreadsheet, &path);
-            Trace("PDF ready");
-            auto handler = create_instance<IPreviewHandler>(PdfPreviewId, CLSCTX_INPROC_SERVER);
-            Trace("Edge created");
-            auto objectSite = handler.try_as<IObjectWithSite>();
-            if (objectSite && site) PreviewResult("Edge site", objectSite->SetSite(site.get()));
-            PreviewResult("Edge init", handler.as<IInitializeWithFile>()->Initialize(path.c_str(), STGM_READ));
-            if (auto visuals = handler.try_as<IPreviewHandlerVisuals>()) {
-                if (background != CLR_INVALID) visuals->SetBackgroundColor(background);
-                if (foreground != CLR_INVALID) visuals->SetTextColor(foreground);
-                if (hasFont) visuals->SetFont(&font);
-            }
-            PreviewResult("Edge window", handler->SetWindow(parent, &area));
-            preview = std::move(handler);
-            const HRESULT result = preview->DoPreview();
-            Trace("Edge DoPreview", result);
-            if (FAILED(result)) Unload();
+            pdf = GetPdf(source.get(), spreadsheet);
+            check_hresult(LoadPage(0));
+            HMODULE module = nullptr;
+            check_bool(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&WindowProc), &module));
+            WNDCLASSW windowClass{};
+            windowClass.lpfnWndProc = WindowProc;
+            windowClass.hInstance = module;
+            windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            windowClass.lpszClassName = L"VitalSkib.OfficeDocumentPreview.1";
+            if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+                throw_last_error();
+            check_bool(CreateWindowExW(0, windowClass.lpszClassName, L"Office document preview",
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_TABSTOP,
+                area.left, area.top, (std::max)(0L, area.right - area.left),
+                (std::max)(0L, area.bottom - area.top), parent, nullptr, module, this) != nullptr);
+            return S_OK;
+        } catch (...) {
+            const HRESULT result = to_hresult();
+            Unload();
             return result;
-        } catch (...) { auto result = to_hresult(); Trace("DoPreview exception", result); return result; }
+        }
     }
+
     HRESULT __stdcall Unload() noexcept override {
-        const HRESULT result = preview ? preview->Unload() : S_OK;
-        preview = nullptr;
+        if (child) DestroyWindow(child);
+        if (pageBitmap) DeleteObject(std::exchange(pageBitmap, nullptr));
+        pdf = nullptr;
         source = nullptr;
-        return result;
+        pageIndex = 0;
+        pageCount = 0;
+        return S_OK;
     }
-    HRESULT __stdcall SetFocus() noexcept override { return preview ? preview->SetFocus() : S_FALSE; }
+    HRESULT __stdcall SetFocus() noexcept override {
+        if (!child) return S_FALSE;
+        ::SetFocus(child);
+        return S_OK;
+    }
     HRESULT __stdcall QueryFocus(HWND* window) noexcept override {
         if (!window) return E_POINTER;
-        *window = nullptr;
-        return preview ? preview->QueryFocus(window) : S_FALSE;
+        *window = ::GetFocus();
+        return *window ? S_OK : S_FALSE;
     }
     HRESULT __stdcall TranslateAccelerator(MSG* message) noexcept override {
-        return preview ? preview->TranslateAccelerator(message) : S_FALSE;
+        if (!message) return E_POINTER;
+        if (message->message == WM_KEYDOWN && HandleKey(message->wParam)) return S_OK;
+        if (auto frame = site.try_as<IPreviewHandlerFrame>()) return frame->TranslateAccelerator(message);
+        return S_FALSE;
     }
     HRESULT __stdcall SetSite(::IUnknown* value) noexcept override {
-        Trace("SetSite");
         site.copy_from(value);
-        if (auto objectSite = preview.try_as<IObjectWithSite>()) return objectSite->SetSite(value);
         return S_OK;
     }
     HRESULT __stdcall GetSite(REFIID iid, void** value) noexcept override {
@@ -261,39 +252,172 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     }
     HRESULT __stdcall GetWindow(HWND* window) noexcept override {
         if (!window) return E_POINTER;
-        *window = parent;
-        if (auto ole = preview.try_as<IOleWindow>()) return ole->GetWindow(window);
-        return parent ? S_OK : E_FAIL;
+        *window = child;
+        return child ? S_OK : E_FAIL;
     }
     HRESULT __stdcall ContextSensitiveHelp(BOOL) noexcept override { return E_NOTIMPL; }
     HRESULT __stdcall SetBackgroundColor(COLORREF color) noexcept override {
         background = color;
-        if (auto visuals = preview.try_as<IPreviewHandlerVisuals>()) return visuals->SetBackgroundColor(color);
+        if (child) InvalidateRect(child, nullptr, TRUE);
         return S_OK;
     }
     HRESULT __stdcall SetTextColor(COLORREF color) noexcept override {
         foreground = color;
-        if (auto visuals = preview.try_as<IPreviewHandlerVisuals>()) return visuals->SetTextColor(color);
+        if (child) InvalidateRect(child, nullptr, TRUE);
         return S_OK;
     }
-    HRESULT __stdcall SetFont(const LOGFONTW* value) noexcept override {
-        if (!value) return E_POINTER;
-        font = *value;
-        hasFont = true;
-        if (auto visuals = preview.try_as<IPreviewHandlerVisuals>()) return visuals->SetFont(value);
+    HRESULT __stdcall SetFont(const LOGFONTW*) noexcept override { return S_OK; }
+
+private:
+    HRESULT LoadPage(UINT index) noexcept {
+        LARGE_INTEGER start{};
+        HRESULT result = pdf->Seek(start, STREAM_SEEK_SET, nullptr);
+        if (FAILED(result)) return result;
+        HBITMAP bitmap = nullptr;
+        UINT count = 0;
+        result = RenderOfficePdfPage(pdf.get(), 1440, index, &bitmap, &count);
+        if (FAILED(result)) return result;
+        if (pageBitmap) DeleteObject(pageBitmap);
+        pageBitmap = bitmap;
+        pageIndex = index;
+        pageCount = count;
         return S_OK;
     }
 
-private:
+    void UpdateToolbar() noexcept {
+        wchar_t label[48]{};
+        swprintf_s(label, L"Page %u / %u", pageIndex + 1, pageCount);
+        SetWindowTextW(pageLabel, label);
+        EnableWindow(previous, pageIndex > 0);
+        EnableWindow(next, pageIndex + 1 < pageCount);
+    }
+
+    void GoToPage(UINT index) noexcept {
+        if (index >= pageCount || index == pageIndex) return;
+        if (SUCCEEDED(LoadPage(index))) {
+            UpdateToolbar();
+            InvalidateRect(child, nullptr, FALSE);
+        }
+    }
+
+    bool HandleKey(WPARAM key) noexcept {
+        if (key == VK_NEXT || key == VK_DOWN || key == VK_RIGHT) GoToPage(pageIndex + 1);
+        else if (key == VK_PRIOR || key == VK_UP || key == VK_LEFT) {
+            if (pageIndex) GoToPage(pageIndex - 1);
+        } else return false;
+        return true;
+    }
+
+    void Layout(int width, int height) noexcept {
+        toolbarHeight = MulDiv(30, GetDpiForWindow(child), 96);
+        const int button = MulDiv(30, GetDpiForWindow(child), 96);
+        const int label = MulDiv(92, GetDpiForWindow(child), 96);
+        const int x = (std::max)(0, (width - button * 2 - label) / 2);
+        const int y = (std::max)(0, height - toolbarHeight);
+        MoveWindow(previous, x, y, button, toolbarHeight, TRUE);
+        MoveWindow(pageLabel, x + button, y, label, toolbarHeight, TRUE);
+        MoveWindow(next, x + button + label, y, button, toolbarHeight, TRUE);
+    }
+
+    COLORREF Background() const noexcept {
+        return background == CLR_INVALID ? GetSysColor(COLOR_WINDOW) : background;
+    }
+
+    void Paint() noexcept {
+        PAINTSTRUCT paint{};
+        HDC target = BeginPaint(child, &paint);
+        RECT panel{};
+        GetClientRect(child, &panel);
+        const HBRUSH brush = CreateSolidBrush(Background());
+        if (brush) {
+            FillRect(target, &panel, brush);
+            DeleteObject(brush);
+        }
+        BITMAP info{};
+        const int width = panel.right - panel.left;
+        const int height = panel.bottom - panel.top - toolbarHeight;
+        if (pageBitmap && width > 0 && height > 0 && GetObjectW(pageBitmap, sizeof(info), &info)) {
+            HDC sourceDC = CreateCompatibleDC(target);
+            if (sourceDC) {
+                const auto previousBitmap = SelectObject(sourceDC, pageBitmap);
+                const double scale = (std::min)(double(width) / info.bmWidth, double(height) / info.bmHeight);
+                const int w = (std::max)(1, int(info.bmWidth * scale));
+                const int h = (std::max)(1, int(info.bmHeight * scale));
+                SetStretchBltMode(target, HALFTONE);
+                StretchBlt(target, (width - w) / 2, (height - h) / 2, w, h,
+                    sourceDC, 0, 0, info.bmWidth, info.bmHeight, SRCCOPY);
+                SelectObject(sourceDC, previousBitmap);
+                DeleteDC(sourceDC);
+            }
+        }
+        EndPaint(child, &paint);
+    }
+
+    static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l) noexcept {
+        auto self = reinterpret_cast<Provider*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            self = static_cast<Provider*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            self->child = window;
+        }
+        if (!self) return DefWindowProcW(window, message, w, l);
+        switch (message) {
+        case WM_CREATE:
+            self->previous = CreateWindowExW(0, L"BUTTON", L"<", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, 0, 0, 0, window, reinterpret_cast<HMENU>(INT_PTR(1)), nullptr, nullptr);
+            self->pageLabel = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+                0, 0, 0, 0, window, nullptr, nullptr, nullptr);
+            self->next = CreateWindowExW(0, L"BUTTON", L">", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0, 0, 0, 0, window, reinterpret_cast<HMENU>(INT_PTR(2)), nullptr, nullptr);
+            if (!self->previous || !self->pageLabel || !self->next) return -1;
+            for (HWND ctrl : {self->previous, self->pageLabel, self->next})
+                SendMessageW(ctrl, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), FALSE);
+            self->UpdateToolbar();
+            return 0;
+        case WM_SIZE:
+            self->Layout(LOWORD(l), HIWORD(l));
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(w) == 2) self->GoToPage(self->pageIndex + 1);
+            if (LOWORD(w) == 1 && self->pageIndex) self->GoToPage(self->pageIndex - 1);
+            return 0;
+        case WM_KEYDOWN:
+            if (self->HandleKey(w)) return 0;
+            break;
+        case WM_MOUSEWHEEL:
+            self->HandleKey(GET_WHEEL_DELTA_WPARAM(w) < 0 ? VK_NEXT : VK_PRIOR);
+            return 0;
+        case WM_LBUTTONDOWN:
+            ::SetFocus(window);
+            return 0;
+        case WM_PAINT:
+            self->Paint();
+            return 0;
+        case WM_CTLCOLORSTATIC:
+            SetBkMode(reinterpret_cast<HDC>(w), TRANSPARENT);
+            ::SetTextColor(reinterpret_cast<HDC>(w), self->foreground == CLR_INVALID
+                ? GetSysColor(COLOR_WINDOWTEXT) : self->foreground);
+            return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            self->child = nullptr;
+            break;
+        }
+        return DefWindowProcW(window, message, w, l);
+    }
+
     bool spreadsheet;
-    com_ptr<IStream> source;
-    com_ptr<IPreviewHandler> preview;
+    com_ptr<IStream> source, pdf;
     com_ptr<::IUnknown> site;
-    HWND parent = nullptr;
+    HWND parent = nullptr, child = nullptr, previous = nullptr, pageLabel = nullptr, next = nullptr;
     RECT area{};
+    HBITMAP pageBitmap = nullptr;
+    UINT pageIndex = 0, pageCount = 0;
+    int toolbarHeight = 30;
     COLORREF background = CLR_INVALID, foreground = CLR_INVALID;
-    LOGFONTW font{};
-    bool hasFont = false;
 };
 
 struct Factory : implements<Factory, IClassFactory, non_agile> {

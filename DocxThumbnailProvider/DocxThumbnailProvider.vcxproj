@@ -22,10 +22,9 @@
     </ClCompile>
     <Link>
       <ModuleDefinitionFile>Exports.def</ModuleDefinitionFile>
-      <AdditionalDependencies>windowsapp.lib;runtimeobject.lib;shell32.lib;ole32.lib;uuid.lib;windowscodecs.lib;gdi32.lib;shlwapi.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>windowsapp.lib;runtimeobject.lib;shell32.lib;ole32.lib;uuid.lib;windowscodecs.lib;gdi32.lib;user32.lib;shlwapi.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="DocxThumbnailProvider.cpp" /><ClCompile Include="PdfRender.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
-
