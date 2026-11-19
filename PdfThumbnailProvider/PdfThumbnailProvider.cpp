@@ -97,7 +97,7 @@ static DWORD WINAPI RenderOnWorker(void* context) noexcept {
     return 0;
 }
 
-struct Provider final : implements<Provider, IThumbnailProvider, IInitializeWithStream, non_agile> {
+struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream, non_agile> {
     com_ptr<IStream> source;
     Provider() { InterlockedIncrement(&objects); }
     ~Provider() { InterlockedDecrement(&objects); }
@@ -136,7 +136,7 @@ struct Provider final : implements<Provider, IThumbnailProvider, IInitializeWith
     }
 };
 
-struct Factory final : implements<Factory, IClassFactory, non_agile> {
+struct Factory : implements<Factory, IClassFactory, non_agile> {
     Factory() { InterlockedIncrement(&objects); }
     ~Factory() { InterlockedDecrement(&objects); }
 
