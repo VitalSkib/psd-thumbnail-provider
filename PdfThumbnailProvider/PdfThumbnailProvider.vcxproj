@@ -25,6 +25,6 @@
       <AdditionalDependencies>windowsapp.lib;runtimeobject.lib;shcore.lib;ole32.lib;uuid.lib;windowscodecs.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="PdfThumbnailProvider.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="PdfThumbnailProvider.cpp" /><ClCompile Include="PdfiumFallback.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

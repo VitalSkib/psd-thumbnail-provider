@@ -19,6 +19,7 @@ using namespace winrt::Windows::Storage::Streams;
 static constexpr GUID ProviderId =
     {0xcd1aa892, 0x67a1, 0x48a9, {0xa7, 0x04, 0x50, 0xf4, 0x3b, 0xf4, 0xd5, 0x69}};
 static long objects = 0;
+HBITMAP RenderPdfiumThumbnail(IStream* source, UINT limit);
 
 struct RenderRequest {
     IStream* marshaled;
@@ -88,7 +89,15 @@ static DWORD WINAPI RenderOnWorker(void* context) noexcept {
         com_ptr<IStream> source;
         IStream* transport = std::exchange(request.marshaled, nullptr);
         check_hresult(CoGetInterfaceAndReleaseStream(transport, __uuidof(IStream), source.put_void()));
-        request.bitmap = RenderPage(source.get(), request.limit);
+        try {
+            request.bitmap = RenderPage(source.get(), request.limit);
+        } catch (const hresult_error& error) {
+            // WinRT rejects some AES-256 documents that open with an empty user password.
+            constexpr HRESULT UnsupportedPdfSecurity = static_cast<HRESULT>(0x80048040);
+            if (error.code() != UnsupportedPdfSecurity) throw;
+            request.bitmap = RenderPdfiumThumbnail(source.get(), request.limit);
+            if (!request.bitmap) throw;
+        }
         request.result = S_OK;
     } catch (...) {
         request.result = to_hresult();
