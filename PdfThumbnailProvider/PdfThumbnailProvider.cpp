@@ -5,6 +5,7 @@
 #include <roapi.h>
 #include <utility>
 #include <wincodec.h>
+#include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Data.Pdf.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <algorithm>
@@ -152,13 +153,13 @@ struct Factory final : implements<Factory, IClassFactory, non_agile> {
     }
 };
 
-extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID iid, void** output) noexcept {
+extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID iid, void** output) {
     if (!output) return E_POINTER;
     *output = nullptr;
     if (clsid != ProviderId) return CLASS_E_CLASSNOTAVAILABLE;
     try { return make_self<Factory>()->QueryInterface(iid, output); }
     catch (...) { return to_hresult(); }
 }
-extern "C" HRESULT __stdcall DllCanUnloadNow() noexcept {
+extern "C" HRESULT __stdcall DllCanUnloadNow() {
     return InterlockedCompareExchange(&objects, 0, 0) ? S_FALSE : S_OK;
 }
