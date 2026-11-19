@@ -98,7 +98,7 @@ static com_ptr<IStream> OpenPdf(const std::wstring& path) {
     return stream;
 }
 
-static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet) {
+static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet, std::wstring* pdfPath = nullptr) {
     auto bytes = ReadDocument(source);
     const auto exe = KnownFolder(FOLDERID_ProgramFiles) + (spreadsheet
         ? LR"(\ArtCraft\GridCraft\gridcraft-cli.exe)" : LR"(\ArtCraft\WordCraft\wordcraft-cli.exe)");
@@ -111,6 +111,7 @@ static com_ptr<IStream> GetPdf(IStream* source, bool spreadsheet) {
     const auto cache = root + (spreadsheet ? L"\\grid-" : L"\\word-")
         + std::to_wstring(version.ftLastWriteTime.dwHighDateTime) + L"-"
         + std::to_wstring(version.ftLastWriteTime.dwLowDateTime) + L"-" + CacheKey(bytes) + L".pdf";
+    if (pdfPath) *pdfPath = cache;
     try { return OpenPdf(cache); }
     catch (const hresult_error&) {
         if (GetFileAttributesW(cache.c_str()) != INVALID_FILE_ATTRIBUTES) throw;
@@ -188,11 +189,12 @@ struct Provider : implements<Provider, IThumbnailProvider, IInitializeWithStream
     HRESULT __stdcall DoPreview() noexcept override {
         if (!source || !parent || preview) return E_UNEXPECTED;
         try {
-            auto pdf = GetPdf(source.get(), spreadsheet);
+            std::wstring path;
+            auto pdf = GetPdf(source.get(), spreadsheet, &path);
             auto handler = create_instance<IPreviewHandler>(PdfPreviewId, CLSCTX_INPROC_SERVER);
             auto objectSite = handler.try_as<IObjectWithSite>();
             if (objectSite && site) check_hresult(objectSite->SetSite(site.get()));
-            check_hresult(handler.as<IInitializeWithStream>()->Initialize(pdf.get(), STGM_READ));
+            check_hresult(handler.as<IInitializeWithFile>()->Initialize(path.c_str(), STGM_READ));
             if (auto visuals = handler.try_as<IPreviewHandlerVisuals>()) {
                 if (background != CLR_INVALID) visuals->SetBackgroundColor(background);
                 if (foreground != CLR_INVALID) visuals->SetTextColor(foreground);
@@ -295,4 +297,3 @@ extern "C" HRESULT __stdcall DllGetClassObject(REFCLSID clsid, REFIID iid, void*
 extern "C" HRESULT __stdcall DllCanUnloadNow() {
     return InterlockedCompareExchange(&objects, 0, 0) ? S_FALSE : S_OK;
 }
-
